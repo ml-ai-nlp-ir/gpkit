@@ -63,17 +63,25 @@ class NomialArray(np.ndarray):
         else:
             return str(self.flatten()[0])  # TODO THIS IS WEIRD
 
-    def latex(self, matwrap=True):
+    def latex(self, excluded=None, matwrap=True):
         "Returns 1D latex list of contents."
+        excluded = [] if excluded is None else excluded
         if len(self.shape) == 0:
-            return self.flatten()[0].latex()
+            return self.flatten()[0].latex(excluded)
         if len(self.shape) == 1:
+            idxless = [el.latex(excluded+["idx"]) for el in self]
+            if all(i == idxless[0] for i in idxless):
+                return self[0].latex(excluded)
             return (("\\begin{bmatrix}" if matwrap else "") +
-                    " & ".join(el.latex() for el in self) +
+                    " & ".join(el.latex(excluded) for el in self) +
                     ("\\end{bmatrix}" if matwrap else ""))
         elif len(self.shape) == 2:
+            idxless = [el.latex(excluded+["idx"], matwrap=False) for el in self]
+            if all(i == idxless[0] for i in idxless):
+                return idxless[0]
             return ("\\begin{bmatrix}" +
-                    " \\\\\n".join(el.latex(matwrap=False) for el in self) +
+                    " \\\\\n".join(el.latex(excluded, matwrap=False)
+                                   for el in self) +
                     "\\end{bmatrix}")
         else:
             return None
