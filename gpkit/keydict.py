@@ -180,11 +180,16 @@ class KeyDict(dict):
 
     def update_keymap(self):
         "Updates the keymap with the keys in _unmapped_keys"
-        while self.keymapping and self._unmapped_keys:
-            key = self._unmapped_keys.pop()
-            if hasattr(key, "keys"):
-                for mapkey in key.keys:
-                    self.keymap[mapkey].add(key)
+        if not self.keymapping:
+            return
+        else:
+            for _ in xrange(len(self._unmapped_keys)):
+                key = self._unmapped_keys.pop()
+                try:
+                    for mapkey in key.keys:
+                        self.keymap[mapkey].add(key)
+                except AttributeError:
+                    pass
 
     def __delitem__(self, key):
         "Overloads del [] to work with all keys"
