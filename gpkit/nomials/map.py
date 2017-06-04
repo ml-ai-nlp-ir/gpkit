@@ -20,10 +20,14 @@ class NomialMap(HashVector):
             if hasattr(thing2, "units"):
                 self.units = Quantity(1, (thing*thing2).units)
                 try:  # faster than "if self.units.dimensionless"
-                    conversion = float(self.units)
-                    self.units = None
-                    for key, value in self.items():
-                        self[key] = value*conversion
+                    if len(self.units._units) == 0: # fast path for no conversions
+                        self.units = None
+                        return
+                    else:
+                        conversion = float(self.units)
+                        self.units = None
+                        for key, value in self.items():
+                            self[key] = value*conversion
                 except DimensionalityError:
                     pass
             else:
