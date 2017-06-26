@@ -1,11 +1,11 @@
 """Tests for SolutionArray class"""
 import unittest
-import time
 import numpy as np
-from gpkit import Variable, VectorVariable, Model
+from gpkit import Variable, VectorVariable, Model, SignomialsEnabled
 import gpkit
 from gpkit.solution_array import results_table
 from gpkit.varkey import VarKey
+from gpkit.small_classes import Strings
 
 
 class TestSolutionArray(unittest.TestCase):
@@ -36,22 +36,6 @@ class TestSolutionArray(unittest.TestCase):
         self.assertEqual(solx.shape, (n,))
         self.assertTrue((abs(solx - 2.5*np.ones(n)) < 1e-7).all())
 
-    def test_call_time(self):
-        N = 20
-        x = VectorVariable(N, 'x', 'm')
-        y = VectorVariable(N, 'y', 'm')
-        z1 = VectorVariable(N, 'z1', 'm')
-        z2 = VectorVariable(N, 'z2', 'm')
-        z3 = VectorVariable(N, 'z3', 'm')
-        z4 = VectorVariable(N, 'z4', 'm')
-        L = Variable('L', 5, 'm')
-        prob = Model(sum(x),
-                     [x >= y, y >= z1, z1 >= z2, z2 >= z3, z3 >= z4, z4 >= L])
-        sol = prob.solve(verbosity=0)
-        t1 = time.time()
-        _ = sol(z1)
-        self.assertLess(time.time() - t1, 0.05)
-
     def test_subinto(self):
         Nsweep = 20
         Pvals = np.linspace(13, 24, Nsweep)
@@ -77,7 +61,7 @@ class TestSolutionArray(unittest.TestCase):
         gp = Model(x, [x >= 12])
         sol = gp.solve(verbosity=0)
         tab = sol.table()
-        self.assertTrue(isinstance(tab, str))
+        self.assertTrue(isinstance(tab, Strings))
 
     def test_units_sub(self):
         # issue 809
@@ -92,6 +76,21 @@ class TestSolutionArray(unittest.TestCase):
             "1000N" in
             sol.table().replace(" ", "").replace("[", "").replace("]", ""))
 
+    def test_key_options(self):
+        # issue 993
+        x = Variable("x")
+        y = Variable("y")
+        with SignomialsEnabled():
+            m = Model(y, [y + 6*x >= 13 + x**2])
+        msol = m.localsolve(verbosity=0)
+        spsol = m.sp().localsolve(verbosity=0)  # pylint: disable=no-member
+        gpsol = m.program.gps[-1].solve(verbosity=0)
+        self.assertEqual(msol(x), msol("x"))
+        self.assertEqual(spsol(x), spsol("x"))
+        self.assertEqual(gpsol(x), gpsol("x"))
+        self.assertEqual(msol(x), spsol(x))
+        self.assertEqual(msol(x), gpsol(x))
+
 
 class TestResultsTable(unittest.TestCase):
     """TestCase for results_table()"""
@@ -104,6 +103,18 @@ class TestResultsTable(unittest.TestCase):
         printstr = "\n".join(results_table(data, title))
         self.assertTrue(" - " in printstr)  # nan is printed as " - "
         self.assertTrue(title in printstr)
+
+    def test_result_access(self):
+        x = Variable("x")
+        y = Variable("y")
+        with SignomialsEnabled():
+            sig = (y + 6*x >= 13 + x**2)
+        m = Model(y, [sig])
+        sol = m.localsolve(verbosity=0)
+        self.assertTrue(all([isinstance(gp.result.table(), Strings)
+                             for gp in m.program.gps]))
+        self.assertAlmostEqual(sol["cost"]/4.0, 1.0, 5)
+        self.assertAlmostEqual(sol("x")/3.0, 1.0, 3)
 
 TESTS = [TestSolutionArray, TestResultsTable]
 

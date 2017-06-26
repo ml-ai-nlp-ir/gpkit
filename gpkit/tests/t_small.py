@@ -1,6 +1,6 @@
 """Tests for small_classes.py and small_scripts.py"""
 import unittest
-from gpkit.small_classes import HashVector
+from gpkit.small_classes import HashVector, CootMatrix
 from gpkit.small_scripts import unitstr
 import gpkit
 
@@ -47,17 +47,34 @@ class TestHashVector(unittest.TestCase):
         self.assertEqual(a * b * c, HashVector())
         self.assertEqual(a * {'x': 6, 'k': 4}, HashVector(x=6))
 
+
+class TestCootMatrix(unittest.TestCase):
+    """TestCase for the CootMatrix class"""
+    def test_shape(self):
+        A = CootMatrix([], [], [])
+        self.assertEqual(A.shape, [0, 0])
+        A.append(0, 0, 1)
+        self.assertEqual(A.shape, [1, 1])
+        A.append(1, 0, -0.5)
+        self.assertEqual(A.shape, [2, 1])
+        A.append(2, 0, -1)
+        self.assertEqual(A.shape, [3, 1])
+        A.append(3, 1, -1)
+        self.assertEqual(A.shape, [4, 2])
+
+
 class TestSmallScripts(unittest.TestCase):
     """TestCase for gpkit.small_scripts"""
     def test_unitstr(self):
         x = gpkit.Variable("x", "ft")
         # pint issue 356
         footstrings = ("ft", "foot")  # backwards compatibility with pint 0.6
-        self.assertEqual(unitstr(gpkit.Variable("n", "count")), "count")
-        self.assertIn(unitstr(x), footstrings)
-        self.assertIn(unitstr(x.key), footstrings)
+        if gpkit.units:
+            self.assertEqual(unitstr(gpkit.Variable("n", "count")), "count")
+            self.assertIn(unitstr(x), footstrings)
+            self.assertIn(unitstr(x.key), footstrings)
         self.assertEqual(unitstr(gpkit.Variable("y"), dimless="---"), "---")
-        self.assertEqual(unitstr(None, dimless="--"), "")
+        self.assertEqual(unitstr(None, dimless="--"), "--")
 
     def test_pint_366(self):
         # test for https://github.com/hgrecco/pint/issues/366
@@ -67,7 +84,7 @@ class TestSmallScripts(unittest.TestCase):
             self.assertEqual(gpkit.units("nautical_mile"), gpkit.units("nmi"))
 
 
-TESTS = [TestHashVector, TestSmallScripts]
+TESTS = [TestHashVector, TestCootMatrix, TestSmallScripts]
 
 
 if __name__ == '__main__':

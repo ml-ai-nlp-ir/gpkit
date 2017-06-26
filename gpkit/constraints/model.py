@@ -1,14 +1,14 @@
 "Implements Model"
+import numpy as np
 from .costed import CostedConstraintSet
 from ..nomials import Monomial
 from .prog_factories import _progify_fctry, _solve_fctry
-from .geometric_program import GeometricProgram
-from .signomial_program import SignomialProgram
-from .linked import LinkedConstraintSet
+from .gp import GeometricProgram
+from .sgp import SequentialGeometricProgram
 from ..small_scripts import mag
-from ..keydict import KeyDict
-from ..varkey import VarKey
-from .. import NamedVariables, SignomialsEnabled
+from ..tools.autosweep import autosweep_1d
+from ..exceptions import InvalidGPConstraint
+from .. import NamedVariables
 
 
 class Model(CostedConstraintSet):
@@ -67,36 +67,21 @@ class Model(CostedConstraintSet):
                 # backwards compatibility: substitutions as third arg
                 substitutions, = args
 
-        cost = cost if cost else Monomial(1)
-        constraints = constraints if constraints else []
+        cost = cost or Monomial(1)
+        constraints = constraints or []
         CostedConstraintSet.__init__(self, cost, constraints, substitutions)
         if setup_vars:
             # add all the vars created in .setup to the Model's varkeys
             # even if they aren't used in any constraints
-            self.unused_variables = setup_vars
+            self.unique_varkeys = frozenset(v.key for v in setup_vars)
+            # TODO: is unique_varkeys really the right way to do this?
             self.reset_varkeys()
-        # for backwards compatibility keep add_modelnames
-        # TODO: remove with linking
-        if not hasattr(self, "setup") and self.__class__.__name__ != "Model":
-            from .. import MODELNUM_LOOKUP
-            print("Declaring a named Model's variables in __init__ is"
-                  " not recommended. For details see gpkit.rtfd.org")
-            self.name = self.__class__.__name__
-            self.num = MODELNUM_LOOKUP[self.name]
-            MODELNUM_LOOKUP[self.name] += 1
-            self._add_modelname_tovars(self.name, self.num)
 
     gp = _progify_fctry(GeometricProgram)
-    sp = _progify_fctry(SignomialProgram)
+    sp = _progify_fctry(SequentialGeometricProgram)
     solve = _solve_fctry(_progify_fctry(GeometricProgram, "solve"))
-    localsolve = _solve_fctry(_progify_fctry(SignomialProgram, "localsolve"))
-
-    # TODO: remove with linking
-    def link(self, other, include_only=None, exclude=None):
-        "Connects this model with a set of constraints"
-        lc = LinkedConstraintSet([self, other], include_only, exclude)
-        cost = self.cost.sub(lc.linked)
-        return Model(cost, lc, lc.substitutions)
+    localsolve = _solve_fctry(_progify_fctry(SequentialGeometricProgram,
+                                             "localsolve"))
 
     def zero_lower_unbounded_variables(self):
         "Recursively substitutes 0 for variables that lack a lower bound"
@@ -118,23 +103,42 @@ class Model(CostedConstraintSet):
         if self.name:
             return "%s_{%s}" % (self.name, self.num)
 
-    # TODO: remove with linking
-    def _add_modelname_tovars(self, name, num):
-        add_model_subs = KeyDict()
-        for vk in self.varkeys:
-            descr = dict(vk.descr)
-            descr["models"] = descr.pop("models", []) + [name]
-            descr["modelnums"] = descr.pop("modelnums", []) + [num]
-            newvk = VarKey(**descr)
-            add_model_subs[vk] = newvk
-            if vk in self.substitutions:
-                self.substitutions[newvk] = self.substitutions[vk]
-                del self.substitutions[vk]
-        with SignomialsEnabled():  # since we're just substituting varkeys.
-            self.subinplace(add_model_subs)
+    def sweep(self, sweeps, **solveargs):
+        "Sweeps {var: values} pairs in sweeps. Returns swept solutions."
+        sols = []
+        for sweepvar, sweepvals in sweeps.items():
+            original_val = self.substitutions.get(sweepvar, None)
+            self.substitutions.update({sweepvar: ('sweep', sweepvals)})
+            try:
+                sols.append(self.solve(**solveargs))
+            except InvalidGPConstraint:
+                sols.append(self.localsolve(**solveargs))
+            if original_val:
+                self.substitutions[sweepvar] = original_val
+            else:
+                del self.substitutions[sweepvar]
+        if len(sols) == 1:
+            return sols[0]
+        return sols
 
-    # pylint: disable=too-many-locals
-    def debug(self, verbosity=1, **solveargs):
+    def autosweep(self, sweeps, tol=0.01, samplepoints=100, **solveargs):
+        """Autosweeps {var: (start, end)} pairs in sweeps to tol.
+
+        Returns swept and sampled solutions.
+        The original simplex tree can be accessed at sol.bst
+        """
+        sols = []
+        for sweepvar, sweepvals in sweeps.items():
+            sweepvar = self[sweepvar].key
+            start, end = sweepvals
+            bst = autosweep_1d(self, tol, sweepvar, [start, end], **solveargs)
+            sols.append(bst.sample_at(np.linspace(start, end, samplepoints)))
+        if len(sols) == 1:
+            return sols[0]
+        return sols
+
+    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    def debug(self, solver=None, verbosity=1, **solveargs):
         "Attempts to diagnose infeasible models."
         from .relax import ConstantsRelaxed, ConstraintsRelaxed
         from .bounded import Bounded
@@ -142,8 +146,10 @@ class Model(CostedConstraintSet):
         sol = None
         relaxedconsts = False
 
-        print "Debugging..."
-        print "_____________________"
+        solveargs["solver"] = solver
+        solveargs["verbosity"] = verbosity
+
+        print "> Trying to solve with bounded variables and relaxed constants"
 
         if self.substitutions:
             constsrelaxed = ConstantsRelaxed(Bounded(self))
@@ -155,7 +161,10 @@ class Model(CostedConstraintSet):
             feas = Model(self.cost, Bounded(self))
 
         try:
-            sol = feas.solve(verbosity=verbosity, **solveargs)
+            try:
+                sol = feas.solve(**solveargs)
+            except InvalidGPConstraint:
+                sol = feas.localsolve(**solveargs)
 
             if self.substitutions:
                 for orig in (o for o, r in zip(constsrelaxed.origvars,
@@ -170,16 +179,20 @@ class Model(CostedConstraintSet):
                     print("  %s: relaxed from %-.4g to %-.4g"
                           % (orig, mag(self.substitutions[orig]),
                              mag(sol(orig))))
+            print "> ...success!"
         except (ValueError, RuntimeWarning):
-            print("\nModel does not solve with bounded variables"
+            print("> ...does not solve with bounded variables"
                   " and relaxed constants.")
-        print "_____________________"
+        print "\n> Trying to solve with relaxed constraints"
 
         try:
             constrsrelaxed = ConstraintsRelaxed(self)
             feas = Model(constrsrelaxed.relaxvars.prod()**30 * self.cost,
                          constrsrelaxed)
-            sol_constraints = feas.solve(verbosity=verbosity, **solveargs)
+            try:
+                sol_constraints = feas.solve(**solveargs)
+            except InvalidGPConstraint:
+                sol_constraints = feas.localsolve(**solveargs)
 
             relaxvals = sol_constraints(constrsrelaxed.relaxvars)
             if any(rv >= 1.01 for rv in relaxvals):
@@ -196,9 +209,8 @@ class Model(CostedConstraintSet):
                     relax_percent = "%i%%" % (0.5+(relaxval-1)*100)
                     print("  %i: %4s relaxed  Canonical form: %s <= %.2f)"
                           % (i, relax_percent, constraint.right, relaxval))
-
+            print "> ...success!"
         except (ValueError, RuntimeWarning):
-            print("\nModel does not solve with relaxed constraints.")
+            print("> ...does not solve with relaxed constraints.")
 
-        print "_____________________"
         return sol

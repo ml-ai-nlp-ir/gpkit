@@ -1,11 +1,12 @@
 """Tests for GP and SP classes"""
-import math
 import unittest
+import numpy as np
 from gpkit import (Model, Monomial, settings, VectorVariable, Variable,
                    SignomialsEnabled, ArrayVariable, SignomialEquality)
+from gpkit.constraints.bounded import Bounded
 from gpkit.small_classes import CootMatrix
 from gpkit.exceptions import InvalidGPConstraint
-from gpkit import NamedVariables
+from gpkit import NamedVariables, units
 
 NDIGS = {"cvxopt": 4, "mosek": 5, "mosek_cli": 5}
 # name: decimal places of accuracy
@@ -37,12 +38,12 @@ class TestGP(unittest.TestCase):
         self.assertEqual(type(prob.latex()), str)
         # pylint: disable=protected-access
         self.assertEqual(type(prob._repr_latex_()), str)
-        self.assertAlmostEqual(sol("x"), math.sqrt(2.), self.ndig)
-        self.assertAlmostEqual(sol("y"), 1/math.sqrt(2.), self.ndig)
+        self.assertAlmostEqual(sol("x"), np.sqrt(2.), self.ndig)
+        self.assertAlmostEqual(sol("y"), 1/np.sqrt(2.), self.ndig)
         self.assertAlmostEqual(sol("x") + 2*sol("y"),
-                               2*math.sqrt(2),
+                               2*np.sqrt(2),
                                self.ndig)
-        self.assertAlmostEqual(sol["cost"], 2*math.sqrt(2), self.ndig)
+        self.assertAlmostEqual(sol["cost"], 2*np.sqrt(2), self.ndig)
 
     def test_sigeq(self):
         x = Variable("x")
@@ -51,7 +52,7 @@ class TestGP(unittest.TestCase):
         with SignomialsEnabled():
             m = Model(c, [c >= (x + 0.25)**2 + (y - 0.5)**2,
                           SignomialEquality(x**2 + x, y)])
-        sol = m.localsolve(verbosity=0)
+        sol = m.localsolve(solver=self.solver, verbosity=0)
         self.assertAlmostEqual(sol("x"), 0.1639472, self.ndig)
         self.assertAlmostEqual(sol("y"), 0.1908254, self.ndig)
         self.assertAlmostEqual(sol("c"), 0.2669448, self.ndig)
@@ -63,7 +64,7 @@ class TestGP(unittest.TestCase):
         m = Model(x,
                   [x >= 1,
                    y == 2])
-        m.solve(verbosity=0)
+        m.solve(solver=self.solver, verbosity=0)
         self.assertEqual(len(m.program[0]), 2)  # pylint:disable=unsubscriptable-object
         self.assertEqual(len(m.program.posynomials), 2)
 
@@ -72,11 +73,14 @@ class TestGP(unittest.TestCase):
         x = Variable("x", 1)
         x_min = Variable("x_{min}", 2)
         m = Model(x, [x >= x_min])
-        self.assertRaises((RuntimeWarning, ValueError), m.solve, verbosity=0)
+        self.assertRaises((RuntimeWarning, ValueError), m.solve,
+                          solver=self.solver, verbosity=0)
         del m.substitutions["x"]
-        self.assertAlmostEqual(m.solve(verbosity=0)["cost"], 2)
+        self.assertAlmostEqual(m.solve(solver=self.solver,
+                                       verbosity=0)["cost"], 2)
         del m.substitutions["x_{min}"]
-        self.assertRaises((RuntimeWarning, ValueError), m.solve, verbosity=0)
+        self.assertRaises((RuntimeWarning, ValueError), m.solve,
+                          solver=self.solver, verbosity=0)
 
     def test_simple_united_gp(self):
         R = Variable("R", "nautical_miles")
@@ -111,9 +115,27 @@ class TestGP(unittest.TestCase):
         self.assertEqual(sol('x').shape, (2,))
         self.assertEqual(sol('y').shape, (2,))
         for x, y in zip(sol('x'), sol('y')):
-            self.assertAlmostEqual(x, math.sqrt(2.), self.ndig)
-            self.assertAlmostEqual(y, 1/math.sqrt(2.), self.ndig)
-        self.assertAlmostEqual(sol["cost"]/(4*math.sqrt(2)), 1., self.ndig)
+            self.assertAlmostEqual(x, np.sqrt(2.), self.ndig)
+            self.assertAlmostEqual(y, 1/np.sqrt(2.), self.ndig)
+        self.assertAlmostEqual(sol["cost"]/(4*np.sqrt(2)), 1., self.ndig)
+
+    def test_sensitivities(self):
+        W_payload = Variable("W_{payload}", 175*(195 + 30), "lbf")
+        if not W_payload.units:
+            return
+        f_oew = Variable("f_{oew}", 0.53, "-", "OEW/MTOW")
+        fuel_per_nm = Variable("\\theta_{fuel}", 13.75, "lbf/nautical_mile")
+        R = Variable("R", 3000, "nautical_miles", "range")
+        mtow = Variable("MTOW", "lbf", "max take off weight")
+
+        m = Model(61.3e6*units.USD*(mtow/(1e5*units.lbf))**0.807,
+                  [mtow >= W_payload + f_oew*mtow + fuel_per_nm*R])
+        sol = m.solve(solver=self.solver, verbosity=0)
+        senss = sol["sensitivities"]["constants"]
+        self.assertAlmostEqual(senss[f_oew], 0.91, 2)
+        self.assertAlmostEqual(senss[R], 0.41, 2)
+        self.assertAlmostEqual(senss[fuel_per_nm], 0.41, 2)
+        self.assertAlmostEqual(senss[W_payload], 0.39, 2)
 
     def test_zero_lower_unbounded(self):
         x = Variable('x', value=4)
@@ -227,7 +249,7 @@ class TestGP(unittest.TestCase):
         gp2 = m2.gp(verbosity=0)
         # pylint: disable=no-member
         self.assertEqual(gp1.A, gp2.A)
-        self.assertTrue((gp1.cs == gp2.cs).all())
+        self.assertTrue(gp1.cs == gp2.cs)
 
 
 class TestSP(unittest.TestCase):
@@ -235,6 +257,71 @@ class TestSP(unittest.TestCase):
     name = "TestSP_"
     solver = None
     ndig = None
+
+    def test_sp_bounded(self):
+        x = Variable("x")
+        y = Variable("y")
+
+        with SignomialsEnabled():
+            m = Model(x, [x + y >= 1, y <= 0.1])  # solves
+        cost = m.localsolve(verbosity=0)["cost"]
+        self.assertAlmostEqual(cost, 0.9, self.ndig)
+
+        with SignomialsEnabled():
+            m = Model(x, [x + y >= 1])  # dual infeasible
+        with self.assertRaises((RuntimeWarning, ValueError)):
+            m.localsolve(verbosity=0)
+
+        with SignomialsEnabled():
+            m = Model(x, Bounded([x + y >= 1], verbosity=0))
+        sol = m.localsolve(verbosity=0)
+        if "value near lower bound" in sol["boundedness"]:
+            self.assertEqual(x.key,
+                             sol["boundedness"]["value near lower bound"][0])
+        if "value near upper bound" in sol["boundedness"]:
+            self.assertEqual(y.key,
+                             sol["boundedness"]["value near upper bound"][0])
+
+    def test_values_vs_subs(self):
+        # Substitutions update method
+        x = Variable("x")
+        y = Variable("y")
+        z = Variable("z")
+
+        with SignomialsEnabled():
+            constraints = [x + y >= z,
+                           y >= x - 1]
+        m = Model(x + y*z, constraints)
+        m.substitutions.update({"z": 5})
+        sol = m.localsolve(verbosity=0)
+        self.assertAlmostEqual(sol["cost"], 13, self.ndig)
+
+        # Constant variable declaration method
+        z = Variable("z", 5)
+        with SignomialsEnabled():
+            constraints = [x + y >= z,
+                           y >= x - 1]
+        m = Model(x + y*z, constraints)
+        sol = m.localsolve(verbosity=0)
+        self.assertAlmostEqual(sol["cost"], 13, self.ndig)
+
+    def test_initially_infeasible(self):
+        x = Variable("x")
+        y = Variable("y")
+
+        with SignomialsEnabled():
+            sigc = x >= y + y**2 - y**3
+            sigc2 = x <= y**0.5
+
+        m = Model(1/x, [sigc, sigc2, y <= 0.5])
+
+        sol = m.localsolve(verbosity=0)
+        self.assertAlmostEqual(sol["cost"], 2**0.5, self.ndig)
+        self.assertAlmostEqual(sol(y), 0.5, self.ndig)
+        second_solve_key_names = [key.name[:5]
+                                  for key in m.program.gps[1].cost.exp.keys()
+                                  if key.name[:5] == "\\fbox"]
+        self.assertIn("\\fbox", second_solve_key_names)
 
     def test_sp_substitutions(self):
         x = Variable('x')
@@ -261,6 +348,17 @@ class TestSP(unittest.TestCase):
         self.assertAlmostEqual(sol["variables"]["x"], 0.9, self.ndig)
         with SignomialsEnabled():
             m = Model(x, [x+y >= 1, y <= 0.1])
+        sol = m.localsolve(self.solver, verbosity=0)
+        self.assertAlmostEqual(sol["variables"]["x"], 0.9, self.ndig)
+
+    def test_tautological_spconstraint(self):
+        x = Variable('x')
+        y = Variable('y')
+        z = Variable('z', 0)
+        with SignomialsEnabled():
+            m = Model(x, [x >= 1-y, y <= 0.1, y >= z])
+        with self.assertRaises(InvalidGPConstraint):
+            m.solve(verbosity=0)
         sol = m.localsolve(self.solver, verbosity=0)
         self.assertAlmostEqual(sol["variables"]["x"], 0.9, self.ndig)
 
@@ -338,10 +436,10 @@ class TestSP(unittest.TestCase):
     def test_sp_initial_guess_sub(self):
         x = Variable("x")
         y = Variable("y")
-        x0 = 1
+        x0 = 2
         y0 = 2
         with SignomialsEnabled():
-            constraints = [y + x >= 2, y <= x]
+            constraints = [y + x >= 4, y <= x]
         objective = x
         m = Model(objective, constraints)
         try:
@@ -349,16 +447,16 @@ class TestSP(unittest.TestCase):
                                solver=self.solver)
         except TypeError:
             self.fail("Call to local solve with only variables failed")
-        self.assertAlmostEqual(sol(x), 1, self.ndig)
-        self.assertAlmostEqual(sol["cost"], 1, self.ndig)
+        self.assertAlmostEqual(sol(x), 2, self.ndig)
+        self.assertAlmostEqual(sol["cost"], 2, self.ndig)
 
         try:
             sol = m.localsolve(x0={"x": x0, "y": y0}, verbosity=0,
                                solver=self.solver)
         except TypeError:
             self.fail("Call to local solve with only variable strings failed")
-        self.assertAlmostEqual(sol("x"), 1, self.ndig)
-        self.assertAlmostEqual(sol["cost"], 1, self.ndig)
+        self.assertAlmostEqual(sol("x"), 2, self.ndig)
+        self.assertAlmostEqual(sol["cost"], 2, self.ndig)
 
         try:
             sol = m.localsolve(x0={"x": x0, y: y0}, verbosity=0,
@@ -366,7 +464,7 @@ class TestSP(unittest.TestCase):
         except TypeError:
             self.fail("Call to local solve with a mix of variable strings "
                       "and variables failed")
-        self.assertAlmostEqual(sol["cost"], 1, self.ndig)
+        self.assertAlmostEqual(sol["cost"], 2, self.ndig)
 
     def test_small_named_signomial(self):
         x = Variable('x')
@@ -396,18 +494,23 @@ class TestSP(unittest.TestCase):
         y = Variable('y')
         with SignomialsEnabled():
             m = Model(x, [x + y >= 1, y <= 0.5])
-        m.localsolve(x0={x: 0.5}, verbosity=0)
-        first_gp_constr_posy = m.program.gps[0][0].as_posyslt1()[0]
+        gp = m.sp().gp(x0={x: 0.5}, verbosity=0)  # pylint: disable=no-member
+        first_gp_constr_posy = gp[0][0].as_posyslt1()[0]
         self.assertEqual(first_gp_constr_posy.exp[x.key], -1./3)
 
     def test_unbounded_debugging(self):
         "Test nearly-dual-feasible problems"
-        from gpkit.constraints.bounded import Bounded
         x = Variable("x")
         y = Variable("y")
         m = Model(x*y, [x*y**1.01 >= 100])
         with self.assertRaises((RuntimeWarning, ValueError)):
             m.solve(self.solver, verbosity=0)
+        # test one-sided bound
+        m = Model(x*y, Bounded(m, verbosity=0, lower=0.001))
+        sol = m.solve(self.solver, verbosity=0)
+        bounds = sol["boundedness"]
+        self.assertEqual(bounds["sensitive to lower bound"], [x.key])
+        # end test one-sided bound
         m = Model(x*y, Bounded(m, verbosity=0))
         sol = m.solve(self.solver, verbosity=0)
         bounds = sol["boundedness"]

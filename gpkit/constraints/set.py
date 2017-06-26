@@ -15,6 +15,7 @@ def _sort_by_name_and_idx(var):
 class ConstraintSet(list):
     "Recursive container for ConstraintSets and Inequalities"
     varkeys = None
+    unique_varkeys = frozenset()
 
     def __init__(self, constraints, substitutions=None):
         if isinstance(constraints, ConstraintSet):
@@ -24,7 +25,6 @@ class ConstraintSet(list):
 
         # initializations for attributes used elsewhere
         self.posymap = []
-        self.unused_variables = None
         self.numpy_bools = False
 
         # get substitutions and convert all members to ConstraintSets
@@ -52,26 +52,40 @@ class ConstraintSet(list):
         if isinstance(key, int):
             return list.__getitem__(self, key)
         else:
-            variables = self.variables_byname(key)
-            if variables[0].key.veckey:
-                # maybe it's all one vector variable!
-                from ..nomials import NomialArray
-                vk = variables[0].key.veckey
-                arr = NomialArray(np.full(vk.shape, np.nan, dtype="object"))
-                arr.key = vk
-                for variable in variables:
-                    if variable.key.veckey == vk:
-                        arr[variable.key.idx] = variable
-                    else:
-                        arr = None
-                        break
-                if arr is not None:
-                    return arr
-            elif len(variables) == 1:
-                return variables[0]
-            raise ValueError("multiple variables are called '%s'; use"
-                             " variables_byname('%s') to see all of them"
-                             % (key, key))
+            return self._choosevar(key, self.variables_byname(key))
+
+    def _choosevar(self, key, variables):
+        if not variables:
+            raise KeyError(key)
+        if variables[0].key.veckey:
+            # maybe it's all one vector variable!
+            from ..nomials import NomialArray
+            vk = variables[0].key.veckey
+            arr = NomialArray(np.full(vk.shape, np.nan, dtype="object"))
+            arr.key = vk
+            for variable in variables:
+                if variable.key.veckey == vk:
+                    arr[variable.key.idx] = variable
+                else:
+                    arr = None
+                    break
+            if arr is not None:
+                return arr
+        elif len(variables) == 1:
+            return variables[0]
+        raise ValueError("multiple variables are called '%s'; use"
+                         " variables_byname('%s') to see all of them"
+                         % (key, key))
+
+    def topvar(self, key):
+        "If a variable by a given name exists in the top model, return it"
+        # TODO: could this be done with unique_varkeys?
+        if not self.naming:  # pylint: disable=no-member
+            raise TypeError("constraintsets must be named to have top-level"
+                            " named variables.")
+        topvars = [var for var in self.variables_byname(key)
+                   if var.key.naming == self.naming]  # pylint: disable=no-member
+        return self._choosevar(key, topvars)
 
     def variables_byname(self, key):
         "Get all variables with a given name"
@@ -82,9 +96,15 @@ class ConstraintSet(list):
         return variables
 
     def __setitem__(self, key, value):
-        if hasattr(value, "substitutions"):
-            self.substitutions.update(value.substitutions)
+        self.substitutions.update(value.substitutions)
         list.__setitem__(self, key, value)
+        self.reset_varkeys()
+
+    def append(self, value):
+        if hasattr(value, "__iter__") and not isinstance(value, ConstraintSet):
+            value = ConstraintSet(value)
+        self.substitutions.update(value.substitutions)
+        list.append(self, value)
         self.reset_varkeys()
 
     __str__ = _str
@@ -164,30 +184,32 @@ class ConstraintSet(list):
 
     def subinplace(self, subs):
         "Substitutes in place."
+        subs = {k.key: getattr(v, "key", v) for k, v in subs.items()}
         for constraint in self:
             constraint.subinplace(subs)
-        if self.unused_variables is not None:
-            unused_vars = []
-            for var in self.unused_variables:
-                if var.key in subs:
-                    unused_vars.append(subs[var.key])
-                else:
-                    unused_vars.append(var.key)
-            self.unused_variables = unused_vars
+        for key in subs:
+            if key not in self.substitutions:
+                continue
+            if hasattr(subs[key], "key"):
+                self.substitutions[subs[key]] = self.substitutions[key]
+                del self.substitutions[key]
+            else:
+                raise ValueError("the substitution {%s: %s} is invalidated"
+                                 " by the subinplace {%s: %s}, because"
+                                 " %s does not have a `key` attribute"
+                                 % (key, self.substitutions[key],
+                                    key, subs[key], subs[key]))
+        self.unique_varkeys = frozenset(subs[vk] if vk in subs else vk
+                                        for vk in self.unique_varkeys)
         self.reset_varkeys()
 
-    def reset_varkeys(self, init_dict=None):
+    def reset_varkeys(self):
         "Goes through constraints and collects their varkeys."
-        varkeys = KeySet()
-        if init_dict is not None:
-            varkeys.update(init_dict)
+        self.varkeys = KeySet(self.unique_varkeys)
         for constraint in self:
             if hasattr(constraint, "varkeys"):
-                varkeys.update(constraint.varkeys)
-        if self.unused_variables is not None:
-            varkeys.update(self.unused_variables)
-        self.varkeys = varkeys
-        self.substitutions.varkeys = varkeys
+                self.varkeys.update(constraint.varkeys)
+        self.substitutions.varkeys = self.varkeys
 
     def as_posyslt1(self, substitutions=None):
         "Returns list of posynomials which must be kept <= 1"
@@ -229,12 +251,12 @@ class ConstraintSet(list):
             offset += n_posys
         return var_senss
 
-    def as_gpconstr(self, x0):
+    def as_gpconstr(self, x0, substitutions=None):
         """Returns GPConstraint approximating this constraint at x0
 
         When x0 is none, may return a default guess."""
-        gpconstrs = [constr.as_gpconstr(x0) for constr in self]
-        return ConstraintSet(gpconstrs, self.substitutions)
+        gpconstrs = [constr.as_gpconstr(x0, substitutions) for constr in self]
+        return ConstraintSet(gpconstrs, substitutions)
 
     def process_result(self, result):
         """Does arbitrary computation / manipulation of a program's result
@@ -252,6 +274,14 @@ class ConstraintSet(list):
         for constraint in self:
             if hasattr(constraint, "process_result"):
                 constraint.process_result(result)
+        for v in self.unique_varkeys:
+            if not v.evalfn or v in result["variables"]:
+                continue
+            if v.veckey:
+                v = v.veckey
+            val = v.evalfn(result["variables"])
+            result["freevariables"][v] = val
+            result["variables"][v] = val
 
 
 def raise_badelement(cns, i, constraint):
@@ -277,7 +307,7 @@ def raise_elementhasnumpybools(constraint):
              " numpy.bool_")
     for side in [constraint.left, constraint.right]:
         if not (isinstance(side, Numbers)
-                or hasattr(side, "exps")
+                or hasattr(side, "hmap")
                 or hasattr(side, "__iter__")):
             cause += (", because "
                       "NomialArray comparison with %.10s %s"

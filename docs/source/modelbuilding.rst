@@ -13,6 +13,19 @@ Variables created in a ``setup`` method are added to the model even if they are 
 
 At the end of this page a detailed example shows this technique in practice.
 
+Accessing Variables in Models
+=============================
+GPkit provides several ways to access a Variable in a ``Model`` (or ``ConstraintSet``):
+
+- using ``Model.variables_byname(key)``. This returns all Variables in the Model, as well as in any submodels, that match the key.
+- using ``Model.topvar(key)``. This returns the top-level Variable that matches the key. The Variable must appear at the top level, not in a submodel.
+- using ``Model.__getitem__``. ``Model[key]`` returns the only variable matching the key, even if the match occurs in a submodel. If multiple variables match the key, an error is raised.
+
+These methods are illustrated in the following example.
+
+.. literalinclude:: examples/model_var_access.py
+
+.. literalinclude:: examples/model_var_access_output.txt
 
 Vectorization
 =============
@@ -53,5 +66,7 @@ In the example below, the models ``Aircraft`` and ``Wing`` have a ``.dynamic()``
 This means that when an aircraft is being optimized for a mission, you can create the aircraft (``AC`` in this example) and then pass it to a ``Mission`` model which can create vectorized aircraft performance models for each flight segment and/or flight condition.
 
 .. literalinclude:: examples/performance_modeling.py
+
+Note that the output table can be filtered with a list of variables to show.
 
 .. literalinclude:: examples/performance_modeling_output.txt

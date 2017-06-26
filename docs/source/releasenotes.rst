@@ -3,6 +3,48 @@ Release Notes
 
 This page lists the changes made in each point version of gpkit.
 
+Version 0.5.3
+=============
+ * faster SP solves (#1109)
+ * LinkedConstraintSet deprecated (#1110)
+ * Fixes to autosweep, ConstraintSet, interactive
+ * Solution time is now stored with soltutions (including sweeps/SPs)
+ * Model strings are divided with slashes (e.g. Airplane/Wing)
+
+Version 0.5.2
+=============
+ * Added new ``sweep`` and ``autosweep`` methods to Model
+    * Added ``plot`` routines to the results of those routines to make it easy to plot a 1D sweep.
+ * Added new ``summary`` method to solution_array.
+    * It and table accept iterables of vars, will only print vars in that iterable (or, by default, all vars)
+ * Cleaned up and documented the ``interactive`` submodule
+    * removed contour and sensitivity plots
+    * added a 1D-sweep plotting function
+    * added that plotting function as an option within the control panel interface
+ * Overhauled and documented three types of variables whose value is determined by functions:
+    * calculated constants
+    * post-solve calculated variables
+    * between-GP-solves calculated variables (for Sequential Geometric Programs)
+ * Fix ``Bounded`` and implement ``debug()`` for SPs
+ * Apply ``subinplace`` to substitutions dictionary as well
+ * Require GP substitutions to be Numbers only
+ * Extend Bounded to one-sided bounds
+ * Print model's numbers by default, unless ``"modelnums" in exclude``
+ * Implement lazy keymapping, allowing GP/SP results to be KeyDicts
+ * Handle Signomial Inequalities that become Posynomial Inequalities after substitution
+ * Various documentation updates
+ * Various bug fixes
+
+Version 0.5.1
+=============
+ * O(N) sums and monomial products
+ * Warn about invalid ConstraintSet elements
+ * allow setting Tight tolerance as a class attribute
+ * full backwards compatibility for __init__ methods
+ * scripts to test remote repositories
+ * minor fixes, tests, and refactors
+ * 3550 lines of code, 1800 lines of tests, 1700 lines of docstring. (not counting `interactive`)
+
 Version 0.5.0
 =============
  * No longer recommend the use of linked variables and subinplace (see below)

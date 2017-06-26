@@ -1,18 +1,6 @@
 """Defines the VarKey class"""
-from .small_classes import Strings, Quantity
+from .small_classes import Strings, Quantity, HashVector, Count
 from .small_scripts import unitstr, veckeyed
-
-
-class Count(object):
-    "Like python 2's itertools.count, for Python 3 compatibility."
-
-    def __init__(self):
-        self.count = -1
-
-    def next(self):
-        "Increment self.count and return it"
-        self.count += 1
-        return self.count
 
 
 class VarKey(object):
@@ -32,33 +20,31 @@ class VarKey(object):
     """
     new_unnamed_id = Count().next
     subscripts = ("models", "idx")
-    eq_ignores = frozenset(["units", "value"])
-    # ignore value in ==. Also skip units, since pints is weird and the unitstr
-    #    will be compared anyway
 
     def __init__(self, name=None, **kwargs):
+        from . import units as ureg  # update in case user disabled units
+        # NOTE: Python arg handling guarantees 'name' won't appear in kwargs
         self.descr = kwargs
-        # Python arg handling guarantees 'name' won't appear in kwargs
         if isinstance(name, VarKey):
             self.descr.update(name.descr)
         else:
             if name is None:
                 name = "\\fbox{%s}" % VarKey.new_unnamed_id()
             self.descr["name"] = str(name)
-
-            # update in case user has disabled units
-            from . import units as ureg
-            if ureg and "units" in self.descr:
+            if "units" in self.descr:
                 units = self.descr["units"]
-                if isinstance(units, Strings):
-                    if units == "-":
-                        units = "dimensionless"
-                    self.descr["units"] = Quantity(1.0, units)
-                elif isinstance(units, Quantity):
-                    self.descr["units"] = units
-                else:
-                    raise ValueError("units must be either a string"
-                                     " or a Quantity from gpkit.units.")
+                if ureg:
+                    if isinstance(units, Strings):
+                        if units in ["", "-"]:  # dimensionless
+                            del self.descr["units"]
+                        else:
+                            self.descr["units"] = Quantity(1.0, units)
+                    elif not isinstance(units, Quantity):
+                        raise ValueError("units must be either a string"
+                                         " or a Quantity from gpkit.units.")
+                else:  # units are disabled
+                    del self.descr["units"]
+                    self.descr["unitslabel"] = units
 
             if "value" in self.descr:
                 value = self.descr["value"]
@@ -73,14 +59,20 @@ class VarKey(object):
             self.descr["unitrepr"] = repr(self.units)
 
         selfstr = str(self)
-        self._hashvalue = hash(selfstr)
+        self.hashstr = selfstr + self.descr["unitrepr"]
+        self._hashvalue = hash(self.hashstr)
         self.key = self
         self.keys = set([self.name, selfstr,
-                         self.str_without("models")])
+                         self.str_without(["modelnums"])])
 
         if "idx" in self.descr:
             self.veckey = veckeyed(self)
             self.keys.add(self.veckey)
+            self.keys.add(self.str_without(["idx"]))
+            self.keys.add(self.str_without(["idx", "modelnums"]))
+
+        self.hmap = NomialMap({HashVector({self: 1}): 1.0})
+        self.hmap.units = self.units
 
     def __repr__(self):
         return self.str_without()
@@ -94,18 +86,33 @@ class VarKey(object):
             if self.descr.get(subscript) and subscript not in excluded:
                 substring = self.descr[subscript]
                 if subscript == "models":
-                    substring = ", ".join(substring)
+                    if self.modelnums and "modelnums" not in excluded:
+                        substring = ["%s.%s" % (ss, mn) if mn > 0 else ss
+                                     for ss, mn
+                                     in zip(substring, self.modelnums)]
+                    substring = "/".join(substring)
                 string += "_%s" % (substring,)
         return string
 
     def __getattr__(self, attr):
         return self.descr.get(attr, None)
 
+    def unitstr(self, dimless=""):
+        "Returns string representation of units"
+        return unitstr(self, into=" [%s] ", dimless=dimless)
+
     def latex_unitstr(self):
         "Returns latex unitstr"
         us = unitstr(self.units, r"~\mathrm{%s}", "L~")
         utf = us.replace("frac", "tfrac").replace(r"\cdot", r"\cdot ")
         return utf if utf != r"~\mathrm{-}" else ""
+
+    @property
+    def naming(self):
+        "Returns this varkey's naming tuple"
+        # TODO: store naming (as special object?) instead of models/modelnums
+        return (tuple(self.descr["models"]),
+                tuple(self.descr["modelnums"]))
 
     def latex(self, excluded=None):
         "Returns latex representation."
@@ -116,6 +123,10 @@ class VarKey(object):
             if subscript in self.descr and subscript not in excluded:
                 substring = self.descr[subscript]
                 if subscript == "models":
+                    if self.modelnums and "modelnums" not in excluded:
+                        substring = ["%s.%s" % (ss, mn) if mn > 0 else ss
+                                     for ss, mn
+                                     in zip(substring, self.modelnums)]
                     substring = ", ".join(substring)
                 string = "{%s}_{%s}" % (string, substring)
                 if subscript == "idx":
@@ -135,17 +146,9 @@ class VarKey(object):
     def __eq__(self, other):
         if not hasattr(other, "descr"):
             return False
-        if self.descr["name"] != other.descr["name"]:
-            return False
-        keyset = set(self.descr.keys())
-        keyset = keyset.symmetric_difference(other.descr.keys())
-        if keyset - self.eq_ignores:
-            return False
-        for key in self.descr:
-            if key not in self.eq_ignores:
-                if self.descr[key] != other.descr[key]:
-                    return False
-        return True
+        return self.hashstr == other.hashstr
 
     def __ne__(self, other):
         return not self.__eq__(other)
+
+from .nomials import NomialMap  # pylint: disable=wrong-import-position

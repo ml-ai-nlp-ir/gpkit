@@ -39,23 +39,10 @@ class TestNomialSubs(unittest.TestCase):
         x_changed_descr["name"] = "y"
         y_descr = list(y.exp)[0].descr
         self.assertEqual(x_changed_descr["name"], y_descr["name"])
-        if not isinstance(descr_before["units"], str):
+        if "units" in descr_before:
             self.assertAlmostEqual(x_changed_descr["units"]/y_descr["units"],
                                    1.0)
         self.assertEqual(x.sub({"x": x}), x)
-
-    def test_quantity_sub(self):
-        if gpkit.units:
-            x = Variable("x", 1, "cm")
-            y = Variable("y", 1)
-            self.assertEqual(x.sub({x: 1*gpkit.units.m}).c.magnitude, 100)
-            # NOTE: uncomment the below if requiring Quantity substitutions
-            # self.assertRaises(ValueError, x.sub, x, 1)
-            self.assertRaises(ValueError, x.sub, {x: 1*gpkit.ureg.N})
-            self.assertRaises(ValueError, y.sub, {y: 1*gpkit.ureg.N})
-            v = gpkit.VectorVariable(3, "v", "cm")
-            subbed = v.sub({v: [1, 2, 3]*gpkit.ureg.m})
-            self.assertEqual([z.c.magnitude for z in subbed], [100, 200, 300])
 
     def test_scalar_units(self):
         x = Variable("x", "m")
@@ -135,13 +122,59 @@ class TestNomialSubs(unittest.TestCase):
             self.assertEqual(subbed, 2*x - y - D)
 
 
-class TestGPSubs(unittest.TestCase):
-    """Test substitution for Model and GP objects"""
+class TestModelSubs(unittest.TestCase):
+    """Test substitution for Model objects"""
+
+    def test_bad_subinplace(self):
+        x = Variable("x")
+        y = Variable("y")
+        z = Variable("z")
+        # good
+        m = Model(x*y, [x >= 1, y >= z], {z: 2})
+        m.subinplace({y: x})
+        self.assertAlmostEqual(m.solve(verbosity=0)["cost"], 4, 5)
+        # bad
+        m = Model(x, [y >= 1], {y: 2})
+        with self.assertRaises(ValueError):
+            m.subinplace({y: 3})
+
+    def test_bad_gp_sub(self):
+        x = Variable("x")
+        y = Variable("y")
+        m = Model(x, [y >= 1], {y: x})
+        with self.assertRaises(ValueError):
+            m.solve()
+        m = Model(x, [y >= 1])
+        m.subinplace({y: x})
+        self.assertAlmostEqual(m.solve(verbosity=0)["cost"], 1)
+
+    def test_quantity_sub(self):
+        if gpkit.units:
+            x = Variable("x", 1, "cm")
+            y = Variable("y", 1)
+            self.assertEqual(x.sub({x: 1*gpkit.units.m}).c.magnitude, 100)
+            # NOTE: uncomment the below if requiring Quantity substitutions
+            # self.assertRaises(ValueError, x.sub, x, 1)
+            self.assertRaises(ValueError, x.sub, {x: 1*gpkit.ureg.N})
+            self.assertRaises(ValueError, y.sub, {y: 1*gpkit.ureg.N})
+            v = gpkit.VectorVariable(3, "v", "cm")
+            subbed = v.sub({v: [1, 2, 3]*gpkit.ureg.m})
+            self.assertEqual([z.c.magnitude for z in subbed], [100, 200, 300])
+            v = VectorVariable(1, "v", "km")
+            v_min = VectorVariable(1, "v_min", "km")
+            m = Model(v.prod(), [v >= v_min],
+                      {v_min: [2*gpkit.units("nmi")]})
+            cost = m.solve(verbosity=0)["cost"]
+            self.assertAlmostEqual(cost/(3.704*gpkit.ureg("km")), 1.0)
+            m = Model(v.prod(), [v >= v_min],
+                      {v_min: np.array([2])*gpkit.units("nmi")})
+            cost = m.solve(verbosity=0)["cost"]
+            self.assertAlmostEqual(cost/(3.704*gpkit.ureg("km")), 1.0)
 
     def test_phantoms(self):
         x = Variable("x")
-        x_ = Variable("x", 1, model="test")
-        xv = VectorVariable(2, "x", [1, 1], model="vec")
+        x_ = Variable("x", 1, models=["test"])
+        xv = VectorVariable(2, "x", [1, 1], models=["vec"])
         m = Model(x, [x >= x_, x_ == xv.prod()])
         m.solve(verbosity=0)
         with self.assertRaises(ValueError):
@@ -209,14 +242,13 @@ class TestGPSubs(unittest.TestCase):
         m.substitutions.update({y: ('sweep', [[2, 3, 9], [5, 7, 11]])})
         self.assertRaises(ValueError, m.solve, verbosity=0)
 
-    def test_linked_sweep(self):
-        def night_hrs(day_hrs):
-            "twenty four minus day hours"
-            return 24 - day_hrs
-        t_day = Variable("t_{day}", "hours")
-        t_night = Variable("t_{night}", night_hrs, "hours", args=[t_day])
+    def test_calcconst(self):
         x = Variable("x", "hours")
+        t_day = Variable("t_{day}", 12, "hours")
+        t_night = Variable("t_{night}", lambda c: 24 - c[t_day], "hours")
         m = Model(x, [x >= t_day, x >= t_night])
+        sol = m.solve(verbosity=0)
+        self.assertAlmostEqual(sol(t_night)/gpkit.ureg.hours, 12)
         m.substitutions.update({t_day: ("sweep", [8, 12, 16])})
         sol = m.solve(verbosity=0)
         self.assertEqual(len(sol["cost"]), 3)
@@ -267,13 +299,14 @@ class TestGPSubs(unittest.TestCase):
             almostequal(1*gpkit.ureg.cm/b.solve(verbosity=0)["cost"], 1, 5)
             almostequal(1*gpkit.ureg.cm/gpkit.ureg.yd/concat_cost, 1, 5)
         a1, b1 = Above(), Below()
-        m = a1.link(b1)
-        m.cost = m["x"]
+        b1.subinplace({b1["x"]: a1["x"]})
+        m = Model(a1["x"], [a1, b1])
         sol = m.solve(verbosity=0)
         if not isinstance(m["x"].key.units, str):
             almostequal(1*gpkit.ureg.cm/sol["cost"], 1, 5)
         a1, b1 = Above(), Below()
-        m = b1.link(a1)
+        a1.subinplace({a1["x"]: b1["x"]})
+        m = Model(b1["x"], [a1, b1])
         m.cost = m["x"]
         sol = m.solve(verbosity=0)
         if not isinstance(m["x"].key.units, str):
@@ -308,10 +341,10 @@ class TestGPSubs(unittest.TestCase):
         class Top(Model):
             "Some high level model"
             def setup(self):
-                x = Variable('x')
-                y = Variable('y')
+                sub = Sub()
+                x = Variable("x")
                 self.cost = x
-                return Sub().link([x >= y, y >= 1])
+                return sub, [x >= sub["y"], sub["y"] >= 1]
 
         class Sub(Model):
             "A simple sub model"
@@ -323,8 +356,20 @@ class TestGPSubs(unittest.TestCase):
         sol = Top().solve(verbosity=0)
         self.assertAlmostEqual(sol['cost'], 2)
 
+    def test_vector_sub(self):
+        x = VectorVariable(3, "x")
+        y = VectorVariable(3, "y")
+        ymax = VectorVariable(3, "ymax")
 
-TESTS = [TestNomialSubs, TestGPSubs]
+        with SignomialsEnabled():
+            # issue1077 links to a case that failed for SPs only
+            m = Model(x.prod(), [x + y >= 1, y <= ymax])
+
+        m.substitutions["ymax"] = [0.3, 0.5, 0.8]
+        m.localsolve(verbosity=0)
+
+
+TESTS = [TestNomialSubs, TestModelSubs]
 
 if __name__ == '__main__':
     run_tests(TESTS)

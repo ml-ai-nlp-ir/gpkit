@@ -2,6 +2,7 @@
 import numpy as np
 from gpkit import Model, Variable, Vectorize
 
+
 class Aircraft(Model):
     "The vehicle model"
     def setup(self):
@@ -10,10 +11,9 @@ class Aircraft(Model):
         self.components = [self.fuse, self.wing]
 
         W = Variable("W", "lbf", "weight")
-        self.weight = W
 
         return self.components, [
-            W >= sum(c["W"] for c in self.components)
+            W >= sum(c.topvar("W") for c in self.components)
             ]
 
     def dynamic(self, state):
@@ -31,9 +31,9 @@ class AircraftP(Model):
         Wburn = Variable("W_{burn}", "lbf", "segment fuel burn")
 
         return self.perf_models, [
-            aircraft.weight + Wfuel <= (0.5*state["\\rho"]*state["V"]**2
-                                        * self.wing_aero["C_L"]
-                                        * aircraft.wing["S"]),
+            aircraft.topvar("W") + Wfuel <= (0.5*state["\\rho"]*state["V"]**2
+                                             * self.wing_aero["C_L"]
+                                             * aircraft.wing["S"]),
             Wburn >= 0.1*self.wing_aero["D"]
             ]
 
@@ -58,14 +58,14 @@ class Mission(Model):
     "A sequence of flight segments"
     def setup(self, aircraft):
         with Vectorize(4):  # four flight segments
-            fs = FlightSegment(aircraft)
+            self.fs = FlightSegment(aircraft)
 
-        Wburn = fs.aircraftp["W_{burn}"]
-        Wfuel = fs.aircraftp["W_{fuel}"]
+        Wburn = self.fs.aircraftp["W_{burn}"]
+        Wfuel = self.fs.aircraftp["W_{fuel}"]
         self.takeoff_fuel = Wfuel[0]
 
-        return fs, [Wfuel[:-1] >= Wfuel[1:] + Wburn[:-1],
-                    Wfuel[-1] >= Wburn[-1]]
+        return self.fs, [Wfuel[:-1] >= Wfuel[1:] + Wburn[:-1],
+                         Wfuel[-1] >= Wburn[-1]]
 
 
 class Wing(Model):
@@ -116,5 +116,9 @@ class Fuselage(Model):
 AC = Aircraft()
 MISSION = Mission(AC)
 M = Model(MISSION.takeoff_fuel, [MISSION, AC])
-SOL = M.solve(verbosity=0)
-print SOL.table()
+sol = M.solve(verbosity=0)
+
+vars_of_interest = set(AC.varkeys)
+vars_of_interest.update(MISSION.fs.aircraftp.unique_varkeys)
+vars_of_interest.add("D")
+print sol.summary(vars_of_interest)

@@ -1,7 +1,6 @@
 """Models for assessing primal feasibility"""
 from .set import ConstraintSet
 from ..nomials import Variable, VectorVariable, parse_subs, NomialArray
-from ..nomials import Monomial
 from ..keydict import KeyDict
 from .. import NamedVariables, MODELNUM_LOOKUP
 
@@ -35,10 +34,8 @@ class ConstraintsRelaxedEqually(ConstraintSet):
         with NamedVariables("Relax"):
             self.relaxvar = Variable("C")
         ConstraintSet.__init__(self,
-                               [[posy <= self.relaxvar
-                                 for posy in posynomials],
-                                self.relaxvar >= 1],
-                               substitutions)
+                               [[p <= self.relaxvar for p in posynomials],
+                                self.relaxvar >= 1], substitutions)
 
 
 class ConstraintsRelaxed(ConstraintSet):
@@ -108,13 +105,15 @@ class ConstantsRelaxed(ConstraintSet):
         exclude = frozenset(exclude) if exclude else frozenset()
         include_only = frozenset(include_only) if include_only else frozenset()
         substitutions = KeyDict(constraints.substitutions)
-        constants, _, _ = parse_subs(constraints.varkeys,
-                                     constraints.substitutions)
+        constants = parse_subs(constraints.varkeys, constraints.substitutions)
         relaxvars, relaxation_constraints = [], []
         self.origvars = []
         self.num = MODELNUM_LOOKUP["Relax"]
+        self._unrelaxmap = {}
         MODELNUM_LOOKUP["Relax"] += 1
         for key, value in constants.items():
+            if value == 0:
+                continue
             if include_only and key.name not in include_only:
                 continue
             if key.name in exclude:
@@ -127,14 +126,26 @@ class ConstantsRelaxed(ConstraintSet):
             relaxation = Variable(**descr)
             relaxvars.append(relaxation)
             del substitutions[key]
-            original = Variable(**key.descr)
-            self.origvars.append(original)
-            if original.units and not hasattr(value, "units"):
-                value *= original.units
-            value = Monomial(value)  # convert for use in constraint
-            relaxation_constraints.append([value/relaxation <= original,
-                                           original <= value*relaxation,
-                                           relaxation >= 1])
+            var = Variable(**key.descr)
+            # TODO: make it easier to make copies of a variable
+            self.origvars.append(var)
+            descr = dict(key.descr)
+            descr["name"] += "_{before}"
+            descr["models"] = descr.pop("models", [])+["Relax"]
+            descr["modelnums"] = descr.pop("modelnums", []) + [self.num]
+            unrelaxed = Variable(**descr)
+            self._unrelaxmap[unrelaxed.key] = key
+            substitutions[unrelaxed] = value
+            relaxation_constraints.append([relaxation >= 1,
+                                           unrelaxed/relaxation <= var,
+                                           var <= unrelaxed*relaxation])
         self.relaxvars = NomialArray(relaxvars)
         ConstraintSet.__init__(self, [constraints, relaxation_constraints])
         self.substitutions = substitutions
+
+    def process_result(self, result):
+        ConstraintSet.process_result(self, result)
+        csenss = result["sensitivities"]["constants"]
+        for const, origvar in self._unrelaxmap.items():
+            csenss[origvar] = csenss[const]
+            del csenss[const]

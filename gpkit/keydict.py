@@ -1,7 +1,22 @@
 "Implements KeyDict and KeySet classes"
 from collections import defaultdict
 import numpy as np
-from .small_classes import Numbers
+from .small_classes import Numbers, Quantity
+from .small_scripts import is_sweepvar
+
+
+def clean_value(key, value):
+    """Gets the value of variable-less monomials, so that
+    `x.sub({x: gpkit.units.m})` and `x.sub({x: gpkit.ureg.m})` are equivalent.
+
+    Also converts any quantities to the key's units, because quantities
+    can't/shouldn't be stored as elements of numpy arrays.
+    """
+    if hasattr(value, "exp") and not value.exp:
+        value = value.value
+    if hasattr(value, "units") and not hasattr(value, "hmap"):
+        value = value.to(key.units or "dimensionless").magnitude
+    return value
 
 
 class KeyDict(dict):
@@ -43,7 +58,15 @@ class KeyDict(dict):
         # pylint: disable=super-init-not-called
         self.varkeys = None
         self.keymap = defaultdict(set)
+        self._unmapped_keys = set()
         self.update(*args, **kwargs)
+
+    def get(self, key, alternative=KeyError):
+        if key not in self:
+            if alternative is KeyError:
+                raise alternative(key)
+            return alternative
+        return self[key]
 
     def update(self, *args, **kwargs):
         "Iterates through the dictionary created by args and kwargs"
@@ -59,26 +82,24 @@ class KeyDict(dict):
         "Returns key if key had one, and veckey/idx for indexed veckeys."
         if hasattr(key, "key"):
             key = key.key
-        else:
-            if self.varkeys:
-                if key in self.varkeys:
-                    keys = self.varkeys[key]
-                    key = next(iter(keys))
-                    if key.veckey:
-                        key = key.veckey
-                    elif len(keys) > 1:
-                        raise ValueError("substitution key '%s' was ambiguous;"
-                                         " .variables_byname('%s') will show"
-                                         " which variables it may refer to."
-                                         % (key, key))
+        elif not self.varkeys:
+            self.update_keymap()
+        elif key in self.varkeys:
+            keys = self.varkeys[key]
+            key = next(iter(keys))
+            if len(keys) > 1:
+                if key.veckey and all(k.veckey == key.veckey for k in keys):
+                    key = key.veckey
                 else:
-                    raise KeyError("key '%s' does not refer to any varkey in"
-                                   " this ConstraintSet" % key)
-        idx = None
-        if self.collapse_arrays:
-            idx = getattr(key, "idx", None)
-            if idx:
-                key = key.veckey
+                    raise ValueError("%s could refer to multiple keys in"
+                                     " this substitutions KeyDict." % key)
+        else:
+            raise KeyError(key)
+        idx = getattr(key, "idx", None)
+        if not self.collapse_arrays:
+            idx = None
+        elif idx:
+            key = key.veckey
         return key, idx
 
     def __contains__(self, key):
@@ -104,7 +125,7 @@ class KeyDict(dict):
         keys = self.keymap[key]
         if not keys:
             del self.keymap[key]  # remove blank entry added due to defaultdict
-            raise KeyError("%s was not found." % key)
+            raise KeyError(key)
         values = []
         for key in keys:
             got = dict.__getitem__(self, key)
@@ -118,36 +139,46 @@ class KeyDict(dict):
 
     def __setitem__(self, key, value):
         "Overloads __setitem__ and []= to work with all keys"
+        # pylint: disable=too-many-boolean-expressions
         key, idx = self.parse_and_index(key)
         if key not in self.keymap:
             self.keymap[key].add(key)
-            if hasattr(key, "keys") and self.keymapping:
-                for mapkey in key.keys:
-                    self.keymap[mapkey].add(key)
+            self._unmapped_keys.add(key)
             if idx:
                 number_array = isinstance(value, Numbers)
                 kwargs = {} if number_array else {"dtype": "object"}
                 emptyvec = np.full(key.shape, np.nan, **kwargs)
                 dict.__setitem__(self, key, emptyvec)
-        for key in self.keymap[key]:
-            if getattr(value, "exp", None) is not None and not value.exp:
-                # get the value of variable-less monomials
-                # so that `x.sub({x: gpkit.units.m})`
-                # and `x.sub({x: gpkit.ureg.m})`
-                # are equivalent
-                value = value.value
-            if idx:
-                dict.__getitem__(self, key)[idx] = value
-            else:
-                if dict.__contains__(self, key) and getattr(value, "shape", ()):
-                    try:
-                        goodvals = ~np.isnan(value)
-                    except TypeError:
-                        pass  # could not evaluate nan-ness! assume no nans
-                    else:
-                        self[key][goodvals] = value[goodvals]
-                        continue
-                dict.__setitem__(self, key, value)
+        if idx:
+            if hasattr(value, "exp") and not value.exp:
+                value = value.value  # substitute constant monomials
+            dict.__getitem__(self, key)[idx] = value
+        else:
+            if (self.collapse_arrays and hasattr(key, "descr")
+                    and "shape" in key.descr  # if veckey, not
+                    and not isinstance(value, (np.ndarray, Quantity))  # array,
+                    and not is_sweepvar(value)  # not sweep, and
+                    and not isinstance(value[0], np.ndarray)):  # not solarray
+                value = np.array([clean_value(key, v) for v in value])
+            if getattr(value, "shape", False) and dict.__contains__(self, key):
+                try:
+                    goodvals = ~np.isnan(value)
+                except TypeError:
+                    pass  # could not evaluate nan-ness! assume no nans
+                else:
+                    self[key][goodvals] = value[goodvals]
+                    return
+            if hasattr(value, "exp") and not value.exp:
+                value = value.value  # substitute constant monomials
+            dict.__setitem__(self, key, value)
+
+    def update_keymap(self):
+        "Updates the keymap with the keys in _unmapped_keys"
+        while self.keymapping and self._unmapped_keys:
+            key = self._unmapped_keys.pop()
+            if hasattr(key, "keys"):
+                for mapkey in key.keys:
+                    self.keymap[mapkey].add(key)
 
     def __delitem__(self, key):
         "Overloads del [] to work with all keys"
@@ -167,9 +198,10 @@ class KeyDict(dict):
                 if self.keymapping and hasattr(key, "keys"):
                     mapkeys.update(key.keys)
                 for mappedkey in mapkeys:
-                    self.keymap[mappedkey].remove(key)
-                    if not self.keymap[mappedkey]:
-                        del self.keymap[mappedkey]
+                    if mappedkey in self.keymap:
+                        self.keymap[mappedkey].remove(key)
+                        if not self.keymap[mappedkey]:
+                            del self.keymap[mappedkey]
 
 
 class KeySet(KeyDict):
@@ -197,8 +229,3 @@ class KeySet(KeyDict):
     def __setitem__(self, key, value):
         "Assigns the key itself every time."
         KeyDict.__setitem__(self, key, None)
-
-
-class FastKeyDict(KeyDict):
-    "KeyDicts that don't map keys, only collapse arrays"
-    keymapping = False

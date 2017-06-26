@@ -3,7 +3,7 @@ import unittest
 from gpkit import Variable, SignomialsEnabled, Posynomial, VectorVariable
 from gpkit.nomials import SignomialInequality, PosynomialInequality
 from gpkit.nomials import MonomialEquality
-from gpkit import LinkedConstraintSet, Model
+from gpkit import Model
 from gpkit.constraints.tight import Tight
 from gpkit.tests.helpers import run_tests
 from gpkit.exceptions import InvalidGPConstraint
@@ -33,6 +33,14 @@ class TestConstraint(unittest.TestCase):
         with self.assertRaises(ValueError):
             _ = Model(x, [v >= ["A", "B"]])
 
+    def test_evalfn(self):
+        x = Variable("x")
+        x2 = Variable("x^2", evalfn=lambda solv: solv[x]**2)
+        m = Model(x, [x >= 2])
+        m.unique_varkeys = set([x2.key])
+        sol = m.solve(verbosity=0)
+        self.assertAlmostEqual(sol(x2), sol(x)**2)
+
     def test_equality_relaxation(self):
         x = Variable("x")
         m = Model(x, [x == 3, x == 4])
@@ -42,9 +50,9 @@ class TestConstraint(unittest.TestCase):
 
     def test_constraintget(self):
         x = Variable("x")
-        x_ = Variable("x", model="_")
+        x_ = Variable("x", models=["_"])
         xv = VectorVariable(2, "x")
-        xv_ = VectorVariable(2, "x", model="_")
+        xv_ = VectorVariable(2, "x", models=["_"])
         self.assertEqual(Model(x, [x >= 1])["x"], x)
         with self.assertRaises(ValueError):
             _ = Model(x, [x >= 1, x_ >= 1])["x"]
@@ -56,31 +64,6 @@ class TestConstraint(unittest.TestCase):
         with self.assertRaises(ValueError):
             _ = Model(xv.prod(), [xv >= 1, x_ >= 1])["x"]
 
-    def test_link_conflict(self):
-        "Check that substitution conflicts are flagged during linking."
-        x_fx1 = Variable("x", 1, models=["fixed1"])
-        x_fx1b = Variable("x", 1, models=["fixed1b"])
-        x_free = Variable("x", models=["free"])
-        x_fx2 = Variable("x", 2, models=["fixed2"])
-        lc = LinkedConstraintSet([x_fx1 >= 1, x_fx1b >= 1])
-        self.assertEqual(lc.substitutions["x"], 1)
-        lc = LinkedConstraintSet([x_fx1 >= 1, x_free >= 1])
-        self.assertEqual(lc.substitutions["x"], 1)
-        self.assertRaises(ValueError,
-                          LinkedConstraintSet, [x_fx1 >= 1, x_fx2 >= 1])
-        vecx_free = VectorVariable(3, "x", models=["free"])
-        vecx_fixed = VectorVariable(3, "x", [1, 2, 3], models=["fixed"])
-        lc = LinkedConstraintSet([vecx_free >= 1, vecx_fixed >= 1])
-        self.assertEqual(lc.substitutions["x"].tolist(), [1, 2, 3])
-
-    def test_exclude_vector(self):
-        x = VectorVariable(2, "x", [2, 1])
-        x_ = VectorVariable(2, "x", [1, 2], model="_")
-        try:
-            LinkedConstraintSet([x >= 1, x_ >= 1], exclude="x")
-        except ValueError:
-            self.fail("linking was an unexpected ValueError (sub conflict?).")
-
     def test_additive_scalar(self):
         """Make sure additive scalars simplify properly"""
         x = Variable('x')
@@ -90,8 +73,7 @@ class TestConstraint(unittest.TestCase):
         self.assertEqual(type(c2), PosynomialInequality)
         c1posy, = c1.as_posyslt1()
         c2posy, = c2.as_posyslt1()
-        self.assertEqual(c1posy.cs, c2posy.cs)
-        self.assertEqual(c1posy.exps, c2posy.exps)
+        self.assertEqual(c1posy.hmap, c2posy.hmap)
 
     def test_additive_scalar_gt1(self):
         """1 can't be greater than (1 + something positive)"""

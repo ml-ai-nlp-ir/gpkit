@@ -19,19 +19,23 @@ from ..keydict import KeyDict
 
 def _progify_fctry(program, return_attr=None):
     "Generates function that returns a program() and optionally an attribute."
-    def programify(self, verbosity=1, substitutions=None, **kwargs):
+    def programify(self, verbosity=1, constants=None, **kwargs):
         """Return program version of self
 
         Arguments
         ---------
         program: NomialData
-            Class to return, e.g. GeometricProgram or SignomialProgram
+            Class to return, e.g. GeometricProgram or SequentialGeometricProgram
         return_attr: string
             attribute to return in addition to the program
         """
-        if not substitutions:
-            substitutions = self.substitutions
-        prog = program(self.cost, self, substitutions, verbosity, **kwargs)
+        if not constants:
+            constants, _, linked = parse_subs(self.varkeys,
+                                              self.substitutions, sweeps=True)
+            if linked:
+                kdc = KeyDict(constants)
+                constants.update({v: f(kdc) for v, f in linked.items()})
+        prog = program(self.cost, self, constants, verbosity, **kwargs)
         if return_attr:
             return prog, getattr(prog, return_attr)
         else:
@@ -66,14 +70,14 @@ def _solve_fctry(genfunction):
          ValueError if the program is invalid.
          RuntimeWarning if an error occurs in solving or parsing the solution.
          """
-        constants, sweep, linkedsweep = parse_subs(self.varkeys,
-                                                   self.substitutions)
+        constants, sweep, linked = parse_subs(self.varkeys,
+                                              self.substitutions, sweeps=True)
         solution = SolutionArray()
 
         # NOTE: SIDE EFFECTS: self.program is set below
         if sweep:
             run_sweep(genfunction, self, solution, skipsweepfailures,
-                      constants, sweep, linkedsweep,
+                      constants, sweep, linked,
                       solver, verbosity, *args, **kwargs)
         else:
             self.program, solvefn = genfunction(self, verbosity)
@@ -83,15 +87,15 @@ def _solve_fctry(genfunction):
         solution.to_united_array(unitless_keys=["sensitivities"], united=True)
         if self.cost.units:
             solution["cost"] = solution["cost"] * self.cost.units
-        solution.classify(KeyDict)
         self.solution = solution  # NOTE: SIDE EFFECTS
+        # TODO: run process_result here, seperately for each i in a sweep?
         return solution
     return solvefn
 
 
 # pylint: disable=too-many-locals,too-many-arguments
 def run_sweep(genfunction, self, solution, skipsweepfailures,
-              constants, sweep, linkedsweep,
+              constants, sweep, linked,
               solver, verbosity, *args, **kwargs):
     "Runs through a sweep."
     if len(sweep) == 1:
@@ -111,10 +115,10 @@ def run_sweep(genfunction, self, solution, skipsweepfailures,
         "Solves one pass of a sweep."
         this_pass = {var: sweep_vect[i]
                      for (var, sweep_vect) in sweep_vects.items()}
-        linked = {var: fn(*[this_pass[v.key] for v in var.descr["args"]])
-                  for var, fn in linkedsweep.items()}
-        this_pass.update(linked)
         constants.update(this_pass)
+        if linked:
+            kdc = KeyDict(constants)
+            constants.update({v: f(kdc) for v, f in linked.items()})
         program, solvefn = genfunction(self, verbosity-1, constants)
         try:
             result = solvefn(solver, verbosity-1, *args, **kwargs)
@@ -140,10 +144,10 @@ def run_sweep(genfunction, self, solution, skipsweepfailures,
         raise RuntimeWarning("no sweeps solved successfully.")
 
     solution["sweepvariables"] = KeyDict()
-    ksweep, klinkedsweep = KeyDict(sweep), KeyDict(linkedsweep)
+    ksweep = KeyDict(sweep)
     delvars = set()
     for var, val in solution["constants"].items():
-        if var in ksweep or var in klinkedsweep:
+        if var in ksweep:
             solution["sweepvariables"][var] = val
             delvars.add(var)
         else:
