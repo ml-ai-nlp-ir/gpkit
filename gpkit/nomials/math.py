@@ -438,6 +438,7 @@ class PosynomialInequality(ScalarSingleEquationConstraint):
 
         """
         hmap = (p_lt / m_gt).hmap
+        hmap = hmap.to("dimensionless")
         if hmap.units:
             raise ValueError("unit mismatch: units of %s cannot be converted"
                              " to units of %s" % (p_lt, m_gt))
