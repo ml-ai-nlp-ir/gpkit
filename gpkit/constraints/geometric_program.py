@@ -198,8 +198,8 @@ class GeometricProgram(CostedConstraintSet, NomialData):
 
         if solver_status.lower() == "near_dual_feas":
             print(RuntimeWarning(
-                  "final status of solver '%s' was '%s', not 'optimal'.\n\n" %
-                  (solvername, solver_status)))
+                "final status of solver '%s' was '%s', not 'optimal'.\n\n" %
+                (solvername, solver_status)))
 
         self._generate_nula(solver_out)
         self.result = self._compile_result(solver_out)  # NOTE: SIDE EFFECTS
